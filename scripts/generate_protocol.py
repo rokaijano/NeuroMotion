@@ -1,9 +1,11 @@
 """Generate a corrected multi-muscle NeuroMotion recording from an explicit YAML protocol."""
 
 import argparse
+import gc
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -18,6 +20,10 @@ from BioMime.utils.basics import load_generator, setup_seed, update_config
 from NeuroMotion.MNPoollib.MNPool import MotoneuronPool
 from NeuroMotion.MNPoollib.mn_params import NUM_MUS, mn_default_settings
 from NeuroMotion.MNPoollib.mn_utils import generate_emg_mu, normalise_physical
+
+
+def revision():
+    return subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
 
 
 def load_condition(path, condition):
@@ -48,7 +54,7 @@ def load_condition(path, condition):
     return protocol, selected, muscles, fs, trajectory("activation"), trajectory("length")
 
 
-def dynamic_muaps(generator, pool, latent, length, steps, device):
+def dynamic_muaps(generator, pool, latent, length, steps, device, batch_size):
     properties = pool.get_properties()
     count = pool.get_num_mu()
     indexes = np.minimum((np.arange(steps) * len(length) / steps).astype(int), len(length) - 1)
@@ -65,8 +71,13 @@ def dynamic_muaps(generator, pool, latent, length, steps, device):
         ))).float()
         if device == "cuda":
             condition, latent = condition.cuda(), latent.cuda()
-        sampled = generator.sample(count, condition, condition.device, latent)
-        muaps.append(sampled.permute(0, 2, 3, 1).cpu().detach().numpy().astype(np.float32))
+        batches = []
+        with torch.no_grad():
+            for start in range(0, count, batch_size):
+                end = min(start + batch_size, count)
+                sampled = generator.sample(end - start, condition[start:end], condition.device, latent[start:end])
+                batches.append(sampled.permute(0, 2, 3, 1).cpu().numpy().astype(np.float32))
+        muaps.append(np.concatenate(batches, axis=0))
     return np.transpose(np.asarray(muaps), (1, 0, 2, 3, 4))
 
 
@@ -80,13 +91,14 @@ def main():
     parser.add_argument("--subject-seed", required=True, type=int)
     parser.add_argument("--trial-seed", required=True, type=int)
     parser.add_argument("--condition-rate-hz", type=float, default=5)
+    parser.add_argument("--generator-batch-size", type=int, default=64)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
     protocol, condition, muscles, fs, activation, length = load_condition(args.protocol, args.condition)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA was requested but is unavailable")
-    if args.condition_rate_hz <= 0 or any(muscle not in NUM_MUS for muscle in muscles):
+    if args.condition_rate_hz <= 0 or args.generator_batch_size <= 0 or any(muscle not in NUM_MUS for muscle in muscles):
         raise ValueError("invalid condition rate or muscle without a NeuroMotion motor-unit pool")
 
     setup_seed(args.subject_seed)
@@ -107,10 +119,12 @@ def main():
     steps = max(1, round(time_samples * args.condition_rate_hz / fs))
     emg = np.zeros((10, 32, time_samples + 96), dtype=np.float32)
     for muscle in muscles:
-        muaps = dynamic_muaps(generator, pools[muscle], latents[muscle], length[muscle], steps, args.device)
+        muaps = dynamic_muaps(generator, pools[muscle], latents[muscle], length[muscle], steps, args.device, args.generator_batch_size)
         spikes = pools[muscle].generate_spike_trains(activation[muscle])[1]
         for motor_unit, train in enumerate(spikes):
             emg += generate_emg_mu(muaps[motor_unit], train, time_samples).astype(np.float32)
+        del muaps
+        gc.collect()
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +132,7 @@ def main():
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".json").write_text(json.dumps({
         "generator": "corrected_multimuscle_protocol_v1",
+        "NeuroMotion_SHA": revision(),
         "movement_name": args.condition,
         "protocol": str(Path(args.protocol)),
         "protocol_version": protocol.get("version"),
@@ -125,6 +140,7 @@ def main():
         "muscles": muscles,
         "source_sampling_rate_hz": fs,
         "condition_rate_hz": args.condition_rate_hz,
+        "generator_batch_size": args.generator_batch_size,
         "tensor_axis_order": ["axial_row", "circumferential_column", "time"],
         "subject_seed": args.subject_seed,
         "trial_seed": args.trial_seed,
