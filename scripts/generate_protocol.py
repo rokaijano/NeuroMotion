@@ -32,8 +32,20 @@ def load_condition(path, condition):
     counts = [round(float(phase["duration_s"]) * fs) for phase in phases]
     if not all(counts):
         raise ValueError("each phase must contain at least one sample")
-    activation = {muscle: np.concatenate([np.full(count, phase["activation"][muscle]) for phase, count in zip(phases, counts)]) for muscle in muscles}
-    length = {muscle: np.concatenate([np.full(count, phase["length"][muscle]) for phase, count in zip(phases, counts)]) for muscle in muscles}
+    def trajectory(key):
+        values = {}
+        for muscle in muscles:
+            previous = phases[0][key][muscle]
+            segments = []
+            for phase, count in zip(phases, counts):
+                target = phase[key][muscle]
+                segments.append(np.linspace(previous, target, count, endpoint=False))
+                previous = target
+            values[muscle] = np.concatenate(segments)
+        return values
+
+    activation = trajectory("activation")
+    length = trajectory("length")
     return protocol, selected, muscles, fs, activation, length
 
 
