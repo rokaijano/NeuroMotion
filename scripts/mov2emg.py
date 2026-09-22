@@ -14,10 +14,10 @@ sys.path.append('.')
 
 from NeuroMotion.MSKlib.MSKpose import MSKModel
 from NeuroMotion.MNPoollib.MNPool import MotoneuronPool
-from NeuroMotion.MNPoollib.mn_utils import plot_spike_trains, generate_emg_mu, normalise_properties
+from NeuroMotion.MNPoollib.mn_utils import plot_spike_trains, generate_emg_mu, normalise_physical, normalise_properties
 from NeuroMotion.MNPoollib.mn_params import DEPTH, ANGLE, MS_AREA, NUM_MUS, mn_default_settings
 from BioMime.models.generator import Generator
-from BioMime.utils.basics import update_config, load_generator
+from BioMime.utils.basics import update_config, load_generator, setup_seed
 from BioMime.utils.plot_functions import plot_muaps
 
 
@@ -29,8 +29,10 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda', type=str, help='cuda|cpu')
     parser.add_argument('--morph', action='store_true', help='morph MUAPs')
     parser.add_argument('--muap_file', default='./ckp/muap_examples.pkl', type=str, help='initial labelled muaps')
+    parser.add_argument('--seed', type=int, default=42, help='random seed')
 
     args = parser.parse_args()
+    setup_seed(args.seed)
     cfg = update_config('./ckp/' + args.cfg)
 
     # PART ONE: Define MSK model, movements, and extract param changes
@@ -80,7 +82,7 @@ if __name__ == '__main__':
     if args.morph:
         num, depth, angle, iz, cv, length, base_muaps = normalise_properties(db, num_mus, steps)
     else:
-        properties = mn_pool.assign_properties(config, normalise=True)
+        properties = mn_pool.assign_properties(config, normalise=False)
         num = torch.from_numpy(properties['num']).reshape(num_mus, 1).repeat(1, steps)
         depth = torch.from_numpy(properties['depth']).reshape(num_mus, 1).repeat(1, steps)
         angle = torch.from_numpy(properties['angle']).reshape(num_mus, 1).repeat(1, steps)
@@ -133,21 +135,21 @@ if __name__ == '__main__':
     start_time = time.time()
 
     muaps = []
+    if not args.morph:
+        zi = torch.randn(num_mus, cfg.Model.Generator.Latent)
+        if args.device == 'cuda':
+            zi = zi.cuda()
     for sp in tqdm(range(steps), dynamic_ncols=True, desc='Simulating MUAPs during dynamic movement...'):
         cond = torch.vstack((
-            num[:, sp],
-            depth[:, sp] * ch_depth.iloc[sp, :].values,
-            angle[:, sp],
-            iz[:, sp],
-            cv[:, sp] * ch_cv.iloc[sp, :].values,
-            length[:, sp] * ch_len.iloc[sp, :].values,
+            normalise_physical(num[:, sp], 'num'),
+            normalise_physical(depth[:, sp] * ch_depth.iloc[sp, :].values, 'depth'),
+            normalise_physical(angle[:, sp], 'angle'),
+            normalise_physical(iz[:, sp], 'iz'),
+            normalise_physical(cv[:, sp] * ch_cv.iloc[sp, :].values, 'cv'),
+            normalise_physical(length[:, sp] * ch_len.iloc[sp, :].values, 'len'),
         )).transpose(1, 0)
 
-        if not args.morph:
-            zi = torch.randn(num_mus, cfg.Model.Generator.Latent)
-            if args.device == 'cuda':
-                zi = zi.cuda()
-        else:
+        if args.morph:
             if args.device == 'cuda':
                 base_muaps = base_muaps.cuda()
 

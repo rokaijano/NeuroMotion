@@ -12,6 +12,7 @@ from BioMime.models.generator import Generator
 from BioMime.utils.basics import update_config, load_generator
 from BioMime.utils.plot_functions import plot_muaps
 from NeuroMotion.MNPoollib.MNPoolStatus import MotoneuronPoolStatus
+from NeuroMotion.MNPoollib.mn_utils import normalise_physical
 from NeuroMotion.MNPoollib.mn_params import mn_default_settings
 
 
@@ -77,7 +78,7 @@ class EMGSynthesiser:
         # one state to keep the previous spike trains
         # one state to keep the previous EMG (emg memory parameter as the length of the window we are going to keep) - dequeue
         # the EMG window should contain two parts, including a causal part and one that contains the tail of MUAP (96 samples)
-        self.emg = np.zeros((10, 32, win_len + 96))
+        self.emg = np.zeros((10, 32, self.win_len + 96))
         self.full_emg = []
 
     def _init_mn_pool(self, MNPool, mnpool_kwargs):
@@ -86,7 +87,7 @@ class EMGSynthesiser:
             mn_pool = MNPool(**v)
             num_mu = mn_pool.N
 
-            properties = mn_pool.assign_properties()
+            properties = mn_pool.assign_properties(normalise=False)
             mn_pool.num = torch.from_numpy(properties["num"]).reshape(num_mu, 1)
             mn_pool.depth = torch.from_numpy(properties["depth"]).reshape(num_mu, 1)
             mn_pool.angle = torch.from_numpy(properties["angle"]).reshape(num_mu, 1)
@@ -126,12 +127,12 @@ class EMGSynthesiser:
 
             # physiological parameters as input condition
             cond = torch.hstack((
-                pool.num,
-                pool.depth * (1 / np.sqrt(ms_len) + 1e-8),
-                pool.angle,
-                pool.iz,
-                pool.cv * (1 / ms_len + 1e-8),
-                pool.length * ms_len,
+                normalise_physical(pool.num, "num"),
+                normalise_physical(pool.depth * (1 / np.sqrt(ms_len) + 1e-8), "depth"),
+                normalise_physical(pool.angle, "angle"),
+                normalise_physical(pool.iz, "iz"),
+                normalise_physical(pool.cv * (1 / ms_len + 1e-8), "cv"),
+                normalise_physical(pool.length * ms_len, "len"),
             ))
 
             if self.device == "cuda":
